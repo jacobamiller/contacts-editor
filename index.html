@@ -658,6 +658,8 @@
   .action-add { background: #dbeafe; color: #1d4ed8; }
   .action-replace { background: #ffedd5; color: #c2410c; }
   .action-same { background: #f0f0f0; color: #888; }
+  .action-badge.clickable { cursor: pointer; }
+  .action-badge.clickable:hover { filter: brightness(0.9); }
 
   /* Per-field confidence pill */
   .field-confidence {
@@ -760,6 +762,7 @@
       <p class="desc">Auto-selected contacts that haven't been enriched yet (or were enriched longest ago).</p>
       <div class="batch-controls">
         <label>Batch size: <input type="number" id="batch-size" value="15" min="1" max="50"></label>
+        <button class="btn btn-secondary" id="enrich-select-all-btn">Select All</button>
         <button class="btn btn-secondary" id="enrich-refresh-btn">Refresh Selection</button>
         <button class="btn btn-primary" id="enrich-generate-btn">Generate Prompt</button>
       </div>
