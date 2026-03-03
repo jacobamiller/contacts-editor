@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Google Contacts Editor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #fafafa;
+    color: #333;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Header */
+  .header {
+    flex-shrink: 0;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    z-index: 100;
+  }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 200px;
+  }
+  .header-left h1 {
+    font-size: 18px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .contact-count {
+    font-size: 13px;
+    color: #666;
+    white-space: nowrap;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Search */
+  .search-input {
+    padding: 6px 12px;
+    border: 1px solid #ccc;
+    border-radius: 20px;
+    font-size: 13px;
+    width: 240px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-input:focus { border-color: #1a73e8; }
+
+  /* Buttons */
+  .btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .btn-primary {
+    background: #1a73e8;
+    color: #fff;
+  }
+  .btn-primary:hover { background: #1557b0; }
+  .btn-secondary {
+    background: #f0f0f0;
+    color: #333;
+    border: 1px solid #ccc;
+  }
+  .btn-secondary:hover { background: #e0e0e0; }
+  .btn-danger {
+    background: #dc2626;
+    color: #fff;
+  }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    font-size: 16px;
+    line-height: 1;
+    color: #666;
+  }
+  .btn-icon:hover { background: #f0f0f0; }
+  .btn-icon.save-btn { color: #16a34a; }
+  .btn-icon.save-btn:hover { background: #dcfce7; }
+  .btn-icon.delete-btn { color: #dc2626; }
+  .btn-icon.delete-btn:hover { background: #fee2e2; }
+
+  /* Sync status */
+  .sync-status {
+    font-size: 12px;
+    color: #666;
+    white-space: nowrap;
+  }
+  .sync-status.saving { color: #f59e0b; }
+  .sync-status.error { color: #dc2626; }
+  .sync-status.success { color: #16a34a; }
+
+  /* Sign-in prompt */
+  .sign-in-prompt {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 60vh;
+    gap: 16px;
+    color: #666;
+  }
+  .sign-in-prompt p { font-size: 15px; }
+
+  /* Main content — fills remaining height, scrolls */
+  #main-content {
+    flex: 1;
+    overflow: auto;
+  }
+
+  /* Table container */
+  .table-container {
+    padding: 0;
+  }
+  .table-container.hidden-keep-layout {
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+  }
+
+  /* Contacts table */
+  .contacts-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid #ddd;
+    table-layout: auto;
+  }
+  .contacts-table colgroup col { width: auto; }
+  .contacts-table colgroup col.col-actions { width: 50px; }
+
+  .contacts-table th {
+    padding: 6px 8px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #666;
+    background: #f5f5f5;
+    border-bottom: 2px solid #ddd;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .contacts-table th:hover { background: #eee; }
+  .contacts-table th .sort-arrow {
+    font-size: 10px;
+    margin-left: 4px;
+    color: #999;
+  }
+  .contacts-table th .sort-arrow.active { color: #1a73e8; }
+  .contacts-table th:last-child {
+    cursor: default;
+    text-align: center;
+  }
+  .contacts-table th:last-child:hover { background: #f5f5f5; }
+
+  .contacts-table td {
+    padding: 4px 8px;
+    font-size: 13px;
+    border-bottom: 1px solid #eee;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    position: relative;
+    max-width: 150px;
+    height: 36px;
+  }
+  .contacts-table td:last-child {
+    cursor: default;
+    text-align: center;
+    overflow: visible;
+  }
+  .contacts-table tr:hover td { background: #f8f9fa; }
+  .contacts-table tr.dirty td { background: #fffde7; }
+  .contacts-table tr.dirty:hover td { background: #fff9c4; }
+  .contacts-table tr.saving td { opacity: 0.6; }
+
+  /* Inline edit */
+  .contacts-table td input.cell-edit,
+  .contacts-table td textarea.cell-edit {
+    width: 100%;
+    border: 1px solid #1a73e8;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    background: #fff;
+  }
+  .contacts-table td textarea.cell-edit {
+    resize: vertical;
+    min-height: 28px;
+  }
+
+  /* Multi-value badge */
+  .multi-badge {
+    display: inline-block;
+    font-size: 10px;
+    background: #e8f0fe;
+    color: #1a73e8;
+    padding: 1px 5px;
+    border-radius: 8px;
+    margin-left: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .multi-badge:hover { background: #d2e3fc; }
+
+  /* Multi-value popup */
+  .mv-popup-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 200;
+  }
+  .mv-popup {
+    position: absolute;
+    z-index: 201;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    padding: 12px;
+    min-width: 300px;
+    max-width: 420px;
+  }
+  .mv-popup h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .mv-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .mv-row input {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  .mv-row input:focus { border-color: #1a73e8; }
+  .mv-row select {
+    padding: 4px 6px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .mv-row .mv-remove {
+    background: none;
+    border: none;
+    color: #dc2626;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .mv-row .mv-remove:hover { background: #fee2e2; }
+  .mv-row .mv-primary {
+    font-size: 11px;
+    color: #1a73e8;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mv-actions {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+  }
+
+  /* Name editor popup */
+  .name-editor {
+    display: flex;
+    gap: 6px;
+  }
+  .name-editor input {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  .name-editor input:focus { border-color: #1a73e8; }
+
+  /* Modal overlay */
+  .modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+  }
+  .modal-overlay.hidden { display: none; }
+  .modal {
+    background: #fff;
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  }
+  .modal h3 { margin-bottom: 12px; font-size: 16px; }
+  .modal p { margin-bottom: 20px; font-size: 14px; color: #555; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  /* Toast notifications */
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 400;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .toast {
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    animation: toast-in 0.2s ease;
+    max-width: 340px;
+  }
+  .toast.success { background: #16a34a; }
+  .toast.error { background: #dc2626; }
+  .toast.info { background: #1a73e8; }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #999;
+    font-size: 14px;
+  }
+
+  /* Detail view */
+  .detail-view {
+    display: none;
+    padding: 20px;
+    max-width: 700px;
+    margin: 0 auto;
+  }
+  .detail-view.active { display: block; }
+  .detail-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #1a73e8;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    margin-bottom: 16px;
+    font-family: inherit;
+  }
+  .detail-back:hover { text-decoration: underline; }
+  .detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  .detail-header h2 {
+    font-size: 22px;
+    font-weight: 600;
+  }
+  .detail-header .detail-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .detail-section {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .detail-section h3 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #666;
+    padding: 10px 16px 6px;
+    background: #f9f9f9;
+    border-bottom: 1px solid #eee;
+  }
+  .detail-field {
+    display: flex;
+    align-items: flex-start;
+    padding: 10px 16px;
+    border-bottom: 1px solid #f0f0f0;
+    gap: 12px;
+  }
+  .detail-field:last-child { border-bottom: none; }
+  .detail-field-label {
+    width: 100px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #888;
+    padding-top: 2px;
+    text-transform: uppercase;
+  }
+  .detail-field-value {
+    flex: 1;
+    font-size: 14px;
+    color: #333;
+    min-height: 20px;
+    cursor: text;
+  }
+  .detail-field-value:empty::after {
+    content: '—';
+    color: #ccc;
+  }
+  .detail-field-value input,
+  .detail-field-value textarea {
+    width: 100%;
+    border: 1px solid #1a73e8;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+  }
+  .detail-field-value textarea {
+    min-height: 60px;
+    resize: vertical;
+  }
+  .detail-multi-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .detail-multi-item:last-child { margin-bottom: 0; }
+  .detail-type-badge {
+    font-size: 11px;
+    color: #666;
+    background: #f0f0f0;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .detail-add-btn {
+    font-size: 12px;
+    color: #1a73e8;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px 0;
+    font-family: inherit;
+  }
+  .detail-add-btn:hover { text-decoration: underline; }
+
+  /* Clickable row */
+  .contacts-table tbody tr { cursor: pointer; }
+
+  /* Tab navigation */
+  .tab-nav {
+    display: none;
+    gap: 0;
+    margin-left: 8px;
+  }
+  .tab-nav.visible { display: flex; }
+  .tab-btn {
+    padding: 4px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid #ccc;
+    background: #f5f5f5;
+    color: #555;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .tab-btn:first-child { border-radius: 4px 0 0 4px; }
+  .tab-btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+  .tab-btn.active {
+    background: #1a73e8;
+    color: #fff;
+    border-color: #1a73e8;
+  }
+
+  /* Enrich view */
+  #enrich-view { display: none; padding: 20px; max-width: 900px; margin: 0 auto; }
+  #enrich-view.active { display: block; }
+
+  .enrich-step { display: none; }
+  .enrich-step.active { display: block; }
+
+  .enrich-step h2 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+  .enrich-step p.desc { font-size: 13px; color: #666; margin-bottom: 16px; }
+
+  /* Select step */
+  .batch-controls {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+  }
+  .batch-controls label { font-size: 13px; color: #555; }
+  .batch-controls input[type="number"] {
+    width: 60px; padding: 4px 8px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 13px;
+  }
+  .contact-checklist {
+    max-height: 420px; overflow-y: auto;
+    border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    margin-bottom: 16px;
+  }
+  .checklist-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; border-bottom: 1px solid #f0f0f0;
+    font-size: 13px; cursor: pointer;
+  }
+  .checklist-item:last-child { border-bottom: none; }
+  .checklist-item:hover { background: #f8f9fa; }
+  .checklist-item input[type="checkbox"] { flex-shrink: 0; }
+  .checklist-name { font-weight: 500; min-width: 160px; }
+  .checklist-meta { color: #888; font-size: 12px; }
+
+  /* Prompt step */
+  .prompt-area {
+    width: 100%; min-height: 200px; max-height: 350px;
+    border: 1px solid #ccc; border-radius: 6px;
+    padding: 12px; font-family: monospace; font-size: 12px;
+    resize: vertical; background: #fafafa;
+  }
+  .prompt-area:focus { border-color: #1a73e8; outline: none; }
+  .prompt-actions {
+    display: flex; gap: 8px; margin: 12px 0;
+  }
+  .paste-label { font-size: 14px; font-weight: 500; margin: 20px 0 8px; }
+  .response-area {
+    width: 100%; min-height: 180px; max-height: 350px;
+    border: 1px solid #ccc; border-radius: 6px;
+    padding: 12px; font-family: monospace; font-size: 12px;
+    resize: vertical;
+  }
+  .response-area:focus { border-color: #1a73e8; outline: none; }
+  .parse-error { color: #dc2626; font-size: 13px; margin-top: 8px; }
+
+  /* Review step */
+  .review-bulk {
+    display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;
+    align-items: center;
+  }
+  .review-bulk .review-summary { font-size: 13px; color: #555; flex: 1; }
+  .review-card {
+    background: #fff; border: 1px solid #ddd; border-radius: 8px;
+    margin-bottom: 14px; overflow: hidden;
+  }
+  .review-card.approved { border-color: #16a34a; opacity: 0.6; }
+  .review-card.skipped { border-color: #999; opacity: 0.5; }
+  .review-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: #f9f9f9; border-bottom: 1px solid #eee;
+  }
+  .review-card-header h3 { font-size: 14px; font-weight: 600; }
+  .confidence-badge {
+    font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: 10px; white-space: nowrap;
+  }
+  .confidence-high { background: #dcfce7; color: #166534; }
+  .confidence-mid { background: #fef9c3; color: #854d0e; }
+  .confidence-low { background: #fee2e2; color: #991b1b; }
+  .review-diff-table {
+    width: 100%; border-collapse: collapse;
+  }
+  .review-diff-table th {
+    text-align: left; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; color: #888;
+    padding: 6px 14px; background: #fafafa; border-bottom: 1px solid #eee;
+  }
+  .review-diff-table td {
+    padding: 6px 14px; font-size: 13px; border-bottom: 1px solid #f0f0f0;
+  }
+  .review-diff-table tr:last-child td { border-bottom: none; }
+  .diff-current { color: #888; }
+  .diff-arrow { color: #999; padding: 0 4px; }
+  .diff-new { color: #1a73e8; font-weight: 500; }
+  .diff-same { color: #aaa; font-style: italic; }
+  .review-card-actions {
+    display: flex; gap: 8px; padding: 10px 16px;
+    background: #fafafa; border-top: 1px solid #eee;
+  }
+
+  /* Progress bar */
+  .enrich-progress {
+    margin-top: 24px; padding: 16px;
+    background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  }
+  .enrich-progress h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #555; }
+  .progress-bar-outer {
+    height: 8px; background: #eee; border-radius: 4px; overflow: hidden;
+  }
+  .progress-bar-inner {
+    height: 100%; background: #1a73e8; border-radius: 4px;
+    transition: width 0.3s;
+  }
+  .progress-text { font-size: 12px; color: #888; margin-top: 4px; }
+  .history-list { margin-top: 12px; }
+  .history-item {
+    font-size: 12px; color: #666; padding: 4px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .history-item:last-child { border-bottom: none; }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .header { padding: 10px 12px; gap: 8px; }
+    .search-input { width: 160px; }
+    .table-container { padding: 8px; }
+    .detail-view { padding: 12px; }
+    .detail-field-label { width: 80px; }
+    #enrich-view { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <h1>Contacts</h1>
+    <div class="tab-nav" id="tab-nav">
+      <button class="tab-btn active" data-tab="contacts">Contacts</button>
+      <button class="tab-btn" data-tab="enrich">Enrich</button>
+    </div>
+    <span class="contact-count" id="contact-count"></span>
+  </div>
+  <div class="header-right">
+    <input type="text" class="search-input" id="search-input" placeholder="Search contacts...">
+    <button class="btn btn-primary" id="new-contact-btn" style="display:none;">+ New Contact</button>
+    <span class="sync-status" id="sync-status"></span>
+    <button class="btn btn-secondary" id="auth-btn">Sign in</button>
+  </div>
+</div>
+
+<div id="main-content">
+  <div class="sign-in-prompt" id="sign-in-prompt">
+    <p>Sign in with Google to view and edit your contacts.</p>
+    <button class="btn btn-primary" onclick="document.getElementById('auth-btn').click()">Sign in with Google</button>
+  </div>
+  <div class="table-container" id="table-container" style="display:none;"></div>
+  <div class="detail-view" id="detail-view"></div>
+  <div id="enrich-view">
+    <!-- Select step -->
+    <div class="enrich-step active" id="enrich-select">
+      <h2>Select Contacts to Enrich</h2>
+      <p class="desc">Auto-selected contacts that haven't been enriched yet (or were enriched longest ago).</p>
+      <div class="batch-controls">
+        <label>Batch size: <input type="number" id="batch-size" value="15" min="1" max="50"></label>
+        <button class="btn btn-secondary" id="enrich-refresh-btn">Refresh Selection</button>
+        <button class="btn btn-primary" id="enrich-generate-btn">Generate Prompt</button>
+      </div>
+      <div class="contact-checklist" id="enrich-checklist"></div>
+    </div>
+    <!-- Prompt step -->
+    <div class="enrich-step" id="enrich-prompt">
+      <h2>Copy Prompt &amp; Paste Response</h2>
+      <p class="desc">Copy the prompt below, paste into ChatGPT or Claude, then paste the JSON response back here.</p>
+      <textarea class="prompt-area" id="enrich-prompt-text" readonly></textarea>
+      <div class="prompt-actions">
+        <button class="btn btn-primary" id="enrich-copy-btn">Copy to Clipboard</button>
+        <button class="btn btn-secondary" id="enrich-back-select-btn">Back to Selection</button>
+      </div>
+      <div class="paste-label">Paste AI Response:</div>
+      <textarea class="response-area" id="enrich-response-text" placeholder="Paste the JSON response here..."></textarea>
+      <div class="prompt-actions">
+        <button class="btn btn-primary" id="enrich-parse-btn">Parse Response</button>
+      </div>
+      <div class="parse-error" id="enrich-parse-error"></div>
+    </div>
+    <!-- Review step -->
+    <div class="enrich-step" id="enrich-review">
+      <h2>Review Enrichment Results</h2>
+      <div class="review-bulk" id="enrich-review-bulk"></div>
+      <div id="enrich-review-cards"></div>
+      <div class="prompt-actions">
+        <button class="btn btn-secondary" id="enrich-back-prompt-btn">Back to Prompt</button>
+        <button class="btn btn-primary" id="enrich-sync-btn">Sync Approved</button>
+      </div>
+    </div>
+    <!-- Progress / History -->
+    <div class="enrich-progress" id="enrich-progress"></div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal-overlay hidden" id="delete-modal">
+  <div class="modal">
+    <h3>Delete Contact</h3>
+    <p id="delete-modal-msg">Are you sure you want to delete this contact? This cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="delete-cancel-btn">Cancel</button>
+      <button class="btn btn-danger" id="delete-confirm-btn">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</body>
+</html>
