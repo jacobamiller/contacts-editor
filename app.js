@@ -14,8 +14,9 @@ let pendingDeleteRN = null;
 /* ── Enrichment state ── */
 let enrichSelectedContacts = [];
 let enrichResults = [];       // parsed AI results
-let enrichCardStates = {};    // { resourceName: { status: 'pending'|'approved'|'skipped', fields: { fieldName: bool } } }
+let enrichCardStates = {};    // { resourceName: { status: 'pending'|'approved'|'skipped', fields: { fieldName: { checked, confidence, source, value } } } }
 let currentTab = 'contacts';
+let tokenRefreshPromise = null;
 
 /* ── DOM refs ── */
 const $ = id => document.getElementById(id);
@@ -70,14 +71,28 @@ function initAuth() {
 }
 
 function onTokenResponse(resp) {
-  if (resp.error) { toast('Auth failed: ' + resp.error, 'error'); return; }
+  if (resp.error) {
+    if (tokenRefreshPromise) { tokenRefreshPromise.reject(new Error('Auth failed: ' + resp.error)); tokenRefreshPromise = null; }
+    toast('Auth failed: ' + resp.error, 'error');
+    return;
+  }
   accessToken = resp.access_token;
+  if (tokenRefreshPromise) { tokenRefreshPromise.resolve(accessToken); tokenRefreshPromise = null; return; }
   authBtn.textContent = 'Sign out';
   signInPrompt.style.display = 'none';
   tableContainer.style.display = '';
   newContactBtn.style.display = '';
   tabNav.classList.add('visible');
   loadAll();
+}
+
+function refreshToken() {
+  if (tokenRefreshPromise) return tokenRefreshPromise.promise;
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  tokenRefreshPromise = { promise, resolve, reject };
+  tokenClient.requestAccessToken();
+  return promise;
 }
 
 function signOut() {
@@ -97,13 +112,13 @@ function signOut() {
   switchTab('contacts');
 }
 
-/* ── API helper ── */
-async function apiFetch(url, opts = {}) {
+/* ── API helper with transparent token refresh ── */
+async function apiFetch(url, opts = {}, _retried = false) {
   const headers = { Authorization: 'Bearer ' + accessToken, ...opts.headers };
   const res = await fetch(url, { ...opts, headers });
-  if (res.status === 401) {
-    tokenClient.requestAccessToken();
-    throw new Error('Token expired');
+  if (res.status === 401 && !_retried) {
+    await refreshToken();
+    return apiFetch(url, opts, true);
   }
   return res;
 }
@@ -1397,26 +1412,27 @@ function generateEnrichmentPrompt() {
     prompt += `\n`;
   });
 
-  prompt += `Return a JSON array with one object per person. Use this exact schema:\n\n`;
+  prompt += `Return a JSON array with one object per person. Each field is an object with value, confidence, and source.\n\n`;
   prompt += `[\n  {\n`;
   prompt += `    "resourceName": "people/cXXX",\n`;
-  prompt += `    "confidence": 85,\n`;
-  prompt += `    "company": "Company Name",\n`;
-  prompt += `    "title": "Job Title",\n`;
-  prompt += `    "email": "additional@email.com",\n`;
-  prompt += `    "phone": "+1-555-0100",\n`;
-  prompt += `    "location": "City, State, Country",\n`;
-  prompt += `    "linkedin": "https://linkedin.com/in/username",\n`;
-  prompt += `    "twitter": "https://twitter.com/username",\n`;
-  prompt += `    "github": "https://github.com/username",\n`;
-  prompt += `    "facebook": "https://facebook.com/username",\n`;
-  prompt += `    "instagram": "https://instagram.com/username",\n`;
-  prompt += `    "website": "https://example.com"\n`;
+  prompt += `    "company": { "value": "Acme Corp", "confidence": 90, "source": "https://linkedin.com/in/johndoe" },\n`;
+  prompt += `    "title": { "value": "VP Engineering", "confidence": 85, "source": "https://linkedin.com/in/johndoe" },\n`;
+  prompt += `    "email": { "value": "john@acme.com", "confidence": 70, "source": "https://acme.com/team" },\n`;
+  prompt += `    "phone": { "value": "", "confidence": 0, "source": "" },\n`;
+  prompt += `    "location": { "value": "San Francisco, CA", "confidence": 80, "source": "https://linkedin.com/in/johndoe" },\n`;
+  prompt += `    "linkedin": { "value": "https://linkedin.com/in/johndoe", "confidence": 95, "source": "https://linkedin.com/in/johndoe" },\n`;
+  prompt += `    "twitter": { "value": "", "confidence": 0, "source": "" },\n`;
+  prompt += `    "github": { "value": "", "confidence": 0, "source": "" },\n`;
+  prompt += `    "facebook": { "value": "", "confidence": 0, "source": "" },\n`;
+  prompt += `    "instagram": { "value": "", "confidence": 0, "source": "" },\n`;
+  prompt += `    "website": { "value": "", "confidence": 0, "source": "" }\n`;
   prompt += `  }\n]\n\n`;
   prompt += `Rules:\n`;
   prompt += `- "resourceName" must match exactly what I gave you above\n`;
-  prompt += `- "confidence" is 0-100, how confident you are in the results for this person\n`;
-  prompt += `- Leave fields as empty string "" if you can't find the information\n`;
+  prompt += `- Each field is { "value": "...", "confidence": 0-100, "source": "URL" }\n`;
+  prompt += `- "confidence" is per-field: how sure you are about THIS specific piece of data\n`;
+  prompt += `- "source" is the URL where you found the info, or "" if general knowledge\n`;
+  prompt += `- Empty string value means no data found for that field\n`;
   prompt += `- Don't repeat information that was already provided above — only add NEW info\n`;
   prompt += `- Return ONLY the JSON array, no other text\n`;
 
@@ -1486,16 +1502,37 @@ function parseEnrichmentResponse() {
   }
 
   $('enrich-parse-error').textContent = '';
+
+  // Normalize: support both new per-field {value, confidence, source} and old plain-string format
+  parsed.forEach(result => {
+    ENRICH_FIELDS.forEach(f => {
+      const raw = result[f];
+      if (raw && typeof raw === 'object' && 'value' in raw) {
+        // New format — keep as-is
+      } else if (typeof raw === 'string') {
+        // Old plain-string format — wrap with defaults
+        result[f] = { value: raw, confidence: 50, source: '' };
+      } else if (raw == null) {
+        result[f] = { value: '', confidence: 0, source: '' };
+      }
+    });
+  });
+
   enrichResults = parsed;
 
-  // Initialize card states
+  // Initialize card states with per-field confidence and source
   enrichCardStates = {};
   parsed.forEach(result => {
-    const confidence = result.confidence || 0;
     const fields = {};
     ENRICH_FIELDS.forEach(f => {
-      if (result[f] && result[f].trim()) {
-        fields[f] = confidence >= 85;
+      const fld = result[f] || { value: '', confidence: 0, source: '' };
+      if (fld.value && fld.value.trim()) {
+        fields[f] = {
+          checked: (fld.confidence || 0) >= 85,
+          confidence: fld.confidence || 0,
+          source: fld.source || '',
+          value: fld.value.trim(),
+        };
       }
     });
     enrichCardStates[result.resourceName] = { status: 'pending', fields };
@@ -1510,6 +1547,25 @@ $('enrich-parse-btn').addEventListener('click', parseEnrichmentResponse);
 /* ══════════════════════════════════════════
    ENRICHMENT — REVIEW CARDS
    ══════════════════════════════════════════ */
+
+// Fields that append (add new entry) vs replace (overwrite existing)
+const APPEND_FIELDS = new Set(['email', 'phone', 'linkedin', 'twitter', 'github', 'facebook', 'instagram', 'website']);
+
+function getFieldAction(field, currentVal, newVal) {
+  if (currentVal.toLowerCase() === newVal.toLowerCase()) return 'same';
+  return APPEND_FIELDS.has(field) ? 'add' : 'replace';
+}
+
+function confidencePill(conf) {
+  const cls = conf >= 85 ? 'field-conf-high' : conf >= 60 ? 'field-conf-mid' : 'field-conf-low';
+  return `<span class="field-confidence ${cls}">${conf}%</span>`;
+}
+
+function sourceLink(src) {
+  if (!src) return '<span class="field-source"><span class="no-source">--</span></span>';
+  const short = src.replace(/^https?:\/\/(www\.)?/, '').split('/')[0];
+  return `<span class="field-source"><a href="${esc(src)}" target="_blank" rel="noopener" title="${esc(src)}">${esc(short)}</a></span>`;
+}
 
 function renderEnrichmentReview() {
   // Bulk actions bar
@@ -1552,29 +1608,37 @@ function renderEnrichmentReview() {
     if (!person) return '';
     const state = enrichCardStates[rn];
     const name = getPrimaryName(person).display;
-    const confidence = result.confidence || 0;
-    const confClass = confidence >= 85 ? 'confidence-high' : confidence >= 60 ? 'confidence-mid' : 'confidence-low';
     const cardClass = state.status !== 'pending' ? state.status : '';
 
     let diffRows = '';
     ENRICH_FIELDS.forEach(field => {
-      const newVal = (result[field] || '').trim();
+      const fld = state.fields[field];
+      if (!fld) return; // no data for this field
+      const newVal = fld.value;
       if (!newVal) return;
       const currentVal = getEnrichCurrentValue(person, field);
-      const isSame = currentVal.toLowerCase() === newVal.toLowerCase();
-      const checked = state.fields[field] && state.status === 'pending' ? 'checked' : '';
+      const action = getFieldAction(field, currentVal, newVal);
+      const actionBadge = action === 'add'
+        ? '<span class="action-badge action-add">ADD</span>'
+        : action === 'replace'
+        ? '<span class="action-badge action-replace">REPLACE</span>'
+        : '<span class="action-badge action-same">SAME</span>';
+      const checked = fld.checked && state.status === 'pending' ? 'checked' : '';
       const disabled = state.status !== 'pending' ? 'disabled' : '';
       diffRows += `<tr>
         <td><input type="checkbox" ${checked} ${disabled} data-rn="${esc(rn)}" data-field="${field}"></td>
+        <td>${actionBadge}</td>
         <td>${esc(field)}</td>
         <td class="diff-current">${esc(currentVal) || '<span style="color:#ccc">empty</span>'}</td>
         <td class="diff-arrow">&rarr;</td>
-        <td class="${isSame ? 'diff-same' : 'diff-new'}">${esc(newVal)}${isSame ? ' (same)' : ''}</td>
+        <td class="${action === 'same' ? 'diff-same' : 'diff-new'}">${esc(newVal)}</td>
+        <td>${confidencePill(fld.confidence)}</td>
+        <td>${sourceLink(fld.source)}</td>
       </tr>`;
     });
 
     if (!diffRows) {
-      diffRows = '<tr><td colspan="5" style="text-align:center;color:#999;padding:12px;">No new data found</td></tr>';
+      diffRows = '<tr><td colspan="8" style="text-align:center;color:#999;padding:12px;">No new data found</td></tr>';
     }
 
     const actions = state.status === 'pending'
@@ -1585,10 +1649,9 @@ function renderEnrichmentReview() {
     return `<div class="review-card ${cardClass}" data-card-rn="${esc(rn)}">
       <div class="review-card-header">
         <h3>${esc(name)}</h3>
-        <span class="confidence-badge ${confClass}">${confidence}% confidence</span>
       </div>
       <table class="review-diff-table">
-        <thead><tr><th></th><th>Field</th><th>Current</th><th></th><th>Found</th></tr></thead>
+        <thead><tr><th></th><th>Action</th><th>Field</th><th>Current</th><th></th><th>Found</th><th>Conf</th><th>Source</th></tr></thead>
         <tbody>${diffRows}</tbody>
       </table>
       <div class="review-card-actions">${actions}</div>
@@ -1601,7 +1664,10 @@ function renderEnrichmentReview() {
       const rn = btn.dataset.approve;
       // Read checkbox states before approving
       cardsEl.querySelectorAll(`input[data-rn="${CSS.escape(rn)}"]`).forEach(cb => {
-        enrichCardStates[rn].fields[cb.dataset.field] = cb.checked;
+        const field = cb.dataset.field;
+        if (enrichCardStates[rn].fields[field]) {
+          enrichCardStates[rn].fields[field].checked = cb.checked;
+        }
       });
       enrichCardStates[rn].status = 'approved';
       renderEnrichmentReview();
@@ -1619,7 +1685,9 @@ function renderEnrichmentReview() {
     cb.addEventListener('change', () => {
       const rn = cb.dataset.rn;
       const field = cb.dataset.field;
-      if (enrichCardStates[rn]) enrichCardStates[rn].fields[field] = cb.checked;
+      if (enrichCardStates[rn]?.fields[field]) {
+        enrichCardStates[rn].fields[field].checked = cb.checked;
+      }
     });
   });
 }
@@ -1649,6 +1717,16 @@ $('enrich-back-prompt-btn').addEventListener('click', () => showEnrichStep('enri
 
 $('enrich-sync-btn').addEventListener('click', syncEnrichmentApproved);
 
+function getEnrichmentLog() {
+  try { return JSON.parse(localStorage.getItem('enrichment_log') || '[]'); }
+  catch { return []; }
+}
+
+function saveEnrichmentLog(log) {
+  if (log.length > 500) log.length = 500;
+  localStorage.setItem('enrichment_log', JSON.stringify(log));
+}
+
 async function syncEnrichmentApproved() {
   const approvedResults = enrichResults.filter(r => enrichCardStates[r.resourceName]?.status === 'approved');
   if (approvedResults.length === 0) {
@@ -1664,6 +1742,7 @@ async function syncEnrichmentApproved() {
   let updated = 0;
   let failed = 0;
   const hist = getEnrichmentHistory();
+  const log = getEnrichmentLog();
 
   for (const result of approvedResults) {
     const rn = result.resourceName;
@@ -1671,25 +1750,61 @@ async function syncEnrichmentApproved() {
     if (!person) { failed++; continue; }
 
     const state = enrichCardStates[rn];
-    const checkedFields = Object.entries(state.fields).filter(([, v]) => v).map(([k]) => k);
+    const checkedFields = Object.entries(state.fields)
+      .filter(([, fld]) => fld.checked)
+      .map(([k]) => k);
     if (checkedFields.length === 0) continue;
+
+    // Build per-field change log before applying
+    const contactName = getPrimaryName(person).display;
+    const changes = [];
+    checkedFields.forEach(field => {
+      const fld = state.fields[field];
+      if (!fld || !fld.value) return;
+      const currentVal = getEnrichCurrentValue(person, field);
+      const action = getFieldAction(field, currentVal, fld.value);
+      if (action === 'same') return;
+      changes.push({
+        field,
+        action,
+        oldValue: currentVal || '',
+        newValue: fld.value,
+        source: fld.source || '',
+        confidence: fld.confidence || 0,
+      });
+    });
 
     // Apply enrichment fields to person object
     checkedFields.forEach(field => {
-      const val = (result[field] || '').trim();
-      if (!val) return;
-      applyEnrichField(person, field, val);
+      const fld = state.fields[field];
+      if (!fld || !fld.value) return;
+      applyEnrichField(person, field, fld.value);
     });
 
     // Save to Google
+    let status = 'synced';
     try {
       await saveContact(rn);
       hist[rn] = { lastEnrichedAt: Date.now(), status: 'enriched' };
       updated++;
     } catch (e) {
       failed++;
+      status = 'failed';
+    }
+
+    // Log per-field changes
+    if (changes.length > 0) {
+      log.unshift({
+        date: Date.now(),
+        contactName,
+        resourceName: rn,
+        changes,
+        status,
+      });
     }
   }
+
+  saveEnrichmentLog(log);
 
   // Record batch summary
   const batches = getBatchHistory();
@@ -1784,18 +1899,70 @@ function renderEnrichProgress() {
   const enriched = Object.keys(hist).length;
   const pct = total > 0 ? Math.round((enriched / total) * 100) : 0;
 
-  const batches = getBatchHistory();
-  const historyHtml = batches.slice(0, 10).map(b => {
-    const date = new Date(b.date).toLocaleDateString();
-    return `<div class="history-item">${date} — ${b.updated} updated, ${b.skipped} skipped${b.failed ? `, ${b.failed} failed` : ''}</div>`;
-  }).join('');
+  const log = getEnrichmentLog();
+  let logHtml = '';
+  if (log.length > 0) {
+    logHtml = '<div style="margin-top:16px;"><strong style="font-size:12px;color:#555;">Change History:</strong>';
+    logHtml += log.slice(0, 50).map((entry, idx) => {
+      const time = new Date(entry.date).toLocaleString();
+      const statusCls = entry.status === 'failed' ? 'failed' : 'synced';
+      const entryFailed = entry.status === 'failed' ? ' log-failed' : '';
+      let changesHtml = '';
+      (entry.changes || []).forEach(ch => {
+        const actionBadge = ch.action === 'add'
+          ? '<span class="action-badge action-add">ADD</span>'
+          : '<span class="action-badge action-replace">REPLACE</span>';
+        const src = ch.source
+          ? `<span class="field-source"><a href="${esc(ch.source)}" target="_blank" rel="noopener">${esc(ch.source.replace(/^https?:\/\/(www\.)?/, '').split('/')[0])}</a></span>`
+          : '';
+        changesHtml += `<div class="log-change-row">
+          ${actionBadge}
+          <span class="log-field">${esc(ch.field)}</span>
+          <span class="log-old">${esc(ch.oldValue) || '<em>empty</em>'}</span>
+          <span class="log-arrow">&rarr;</span>
+          <span class="log-new">${esc(ch.newValue)}</span>
+          ${confidencePill(ch.confidence)}
+          ${src}
+        </div>`;
+      });
+      return `<div class="log-entry${entryFailed}">
+        <div class="log-entry-header" data-log-idx="${idx}">
+          <span><span class="log-time">${esc(time)}</span> &nbsp; <span class="log-name">${esc(entry.contactName)}</span></span>
+          <span class="log-status ${statusCls}">${entry.status} (${(entry.changes || []).length} fields)</span>
+        </div>
+        <div class="log-changes" id="log-changes-${idx}">${changesHtml}</div>
+      </div>`;
+    }).join('');
+    logHtml += '<button class="clear-history-btn" id="clear-enrich-log">Clear History</button>';
+    logHtml += '</div>';
+  }
 
   $('enrich-progress').innerHTML = `
     <h3>Enrichment Progress</h3>
     <div class="progress-bar-outer"><div class="progress-bar-inner" style="width:${pct}%"></div></div>
     <div class="progress-text">${enriched} of ${total} contacts enriched (${pct}%)</div>
-    ${batches.length > 0 ? `<div class="history-list"><strong style="font-size:12px;color:#555;">Recent Batches:</strong>${historyHtml}</div>` : ''}
+    ${logHtml}
   `;
+
+  // Bind expand/collapse
+  $('enrich-progress').querySelectorAll('.log-entry-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const idx = hdr.dataset.logIdx;
+      const changes = $('log-changes-' + idx);
+      if (changes) changes.classList.toggle('expanded');
+    });
+  });
+
+  // Bind clear history
+  const clearBtn = $('clear-enrich-log');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      localStorage.removeItem('enrichment_log');
+      localStorage.removeItem('enrichment_batches');
+      renderEnrichProgress();
+      toast('History cleared', 'info');
+    });
+  }
 }
 
 /* ══════════════════════════════════════════
