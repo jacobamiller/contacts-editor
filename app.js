@@ -1822,12 +1822,13 @@ async function syncEnrichmentApproved() {
       const dateStr = now.getFullYear().toString()
         + String(now.getMonth() + 1).padStart(2, '0')
         + String(now.getDate()).padStart(2, '0');
-      const enrichedList = changes.map(c => c.field).join(', ');
+      const enrichedParts = changes.map(c =>
+        c.action === 'replace' && c.oldValue ? `${c.field}(was: "${c.oldValue}")` : c.field
+      ).join(', ');
       const deleted = changes.filter(c => c.action === 'replace' && c.oldValue);
-      let auditLine = `${dateStr} Enriched: ${enrichedList}`;
+      let auditLine = `${dateStr} Enriched: ${enrichedParts}`;
       if (deleted.length > 0) {
-        const deletedParts = deleted.map(c => `${c.field}(was: "${c.oldValue}")`).join(', ');
-        auditLine += ` DELETED: ${deletedParts}`;
+        auditLine += ` DELETED: ${deleted.map(c => c.field).join(', ')}`;
       }
       const existingNotes = getNotes(person);
       const newNotes = existingNotes ? auditLine + '\n' + existingNotes : auditLine;
