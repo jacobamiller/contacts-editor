@@ -1512,15 +1512,18 @@ function parseEnrichmentResponse() {
 
   $('enrich-parse-error').textContent = '';
 
+  // Strip markdown link syntax: [text](url) → url
+  const stripMdLink = s => s.replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$2');
+
   // Normalize: support both new per-field {value, confidence, source} and old plain-string format
   parsed.forEach(result => {
     ENRICH_FIELDS.forEach(f => {
       const raw = result[f];
       if (raw && typeof raw === 'object' && 'value' in raw) {
-        // New format — keep as-is
+        raw.value = stripMdLink(raw.value || '');
+        if (raw.source) raw.source = stripMdLink(raw.source);
       } else if (typeof raw === 'string') {
-        // Old plain-string format — wrap with defaults
-        result[f] = { value: raw, confidence: 50, source: '' };
+        result[f] = { value: stripMdLink(raw), confidence: 50, source: '' };
       } else if (raw == null) {
         result[f] = { value: '', confidence: 0, source: '' };
       }
