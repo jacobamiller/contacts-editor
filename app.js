@@ -1370,7 +1370,16 @@ function renderEnrichChecklist() {
       <span class="checklist-meta">${esc(email)}${org.company ? ' · ' + esc(org.company) : ''} · ${meta}</span>
     </label>`;
   }).join('');
+  // All start checked, so show Deselect All
+  $('enrich-select-all-btn').textContent = 'Deselect All';
 }
+
+$('enrich-select-all-btn').addEventListener('click', () => {
+  const checkboxes = $('enrich-checklist').querySelectorAll('input[type="checkbox"]');
+  const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+  checkboxes.forEach(cb => cb.checked = !allChecked);
+  $('enrich-select-all-btn').textContent = allChecked ? 'Select All' : 'Deselect All';
+});
 
 $('enrich-refresh-btn').addEventListener('click', enrichRefreshSelection);
 
@@ -1532,6 +1541,7 @@ function parseEnrichmentResponse() {
           confidence: fld.confidence || 0,
           source: fld.source || '',
           value: fld.value.trim(),
+          action: null, // null = auto-detect via getFieldAction
         };
       }
     });
@@ -1617,14 +1627,17 @@ function renderEnrichmentReview() {
       const newVal = fld.value;
       if (!newVal) return;
       const currentVal = getEnrichCurrentValue(person, field);
-      const action = getFieldAction(field, currentVal, newVal);
+      const autoAction = getFieldAction(field, currentVal, newVal);
+      const action = (autoAction === 'same') ? 'same' : (fld.action || autoAction);
+      const isPending = state.status === 'pending';
+      const clickable = isPending && action !== 'same' ? ' clickable' : '';
       const actionBadge = action === 'add'
-        ? '<span class="action-badge action-add">ADD</span>'
+        ? `<span class="action-badge action-add${clickable}" data-rn="${esc(rn)}" data-field="${field}">ADD</span>`
         : action === 'replace'
-        ? '<span class="action-badge action-replace">REPLACE</span>'
+        ? `<span class="action-badge action-replace${clickable}" data-rn="${esc(rn)}" data-field="${field}">REPLACE</span>`
         : '<span class="action-badge action-same">SAME</span>';
-      const checked = fld.checked && state.status === 'pending' ? 'checked' : '';
-      const disabled = state.status !== 'pending' ? 'disabled' : '';
+      const checked = fld.checked && isPending ? 'checked' : '';
+      const disabled = !isPending ? 'disabled' : '';
       diffRows += `<tr>
         <td><input type="checkbox" ${checked} ${disabled} data-rn="${esc(rn)}" data-field="${field}"></td>
         <td>${actionBadge}</td>
@@ -1688,6 +1701,23 @@ function renderEnrichmentReview() {
       if (enrichCardStates[rn]?.fields[field]) {
         enrichCardStates[rn].fields[field].checked = cb.checked;
       }
+    });
+  });
+
+  // Action badge toggle (ADD ↔ REPLACE)
+  cardsEl.querySelectorAll('.action-badge.clickable').forEach(badge => {
+    badge.addEventListener('click', () => {
+      const rn = badge.dataset.rn;
+      const field = badge.dataset.field;
+      const fld = enrichCardStates[rn]?.fields[field];
+      if (!fld) return;
+      const person = allContacts.find(p => p.resourceName === rn);
+      if (!person) return;
+      const currentVal = getEnrichCurrentValue(person, field);
+      const autoAction = getFieldAction(field, currentVal, fld.value);
+      const current = fld.action || autoAction;
+      fld.action = current === 'add' ? 'replace' : 'add';
+      renderEnrichmentReview();
     });
   });
 }
@@ -1762,7 +1792,8 @@ async function syncEnrichmentApproved() {
       const fld = state.fields[field];
       if (!fld || !fld.value) return;
       const currentVal = getEnrichCurrentValue(person, field);
-      const action = getFieldAction(field, currentVal, fld.value);
+      const autoAction = getFieldAction(field, currentVal, fld.value);
+      const action = (autoAction === 'same') ? 'same' : (fld.action || autoAction);
       if (action === 'same') return;
       changes.push({
         field,
@@ -1778,8 +1809,33 @@ async function syncEnrichmentApproved() {
     checkedFields.forEach(field => {
       const fld = state.fields[field];
       if (!fld || !fld.value) return;
-      applyEnrichField(person, field, fld.value);
+      const currentVal = getEnrichCurrentValue(person, field);
+      const autoAction = getFieldAction(field, currentVal, fld.value);
+      const action = (autoAction === 'same') ? 'same' : (fld.action || autoAction);
+      if (action === 'same') return;
+      applyEnrichField(person, field, fld.value, action);
     });
+
+    // Prepend notes audit trail
+    if (changes.length > 0) {
+      const now = new Date();
+      const dateStr = now.getFullYear().toString()
+        + String(now.getMonth() + 1).padStart(2, '0')
+        + String(now.getDate()).padStart(2, '0');
+      const enrichedList = changes.map(c => c.field).join(', ');
+      const deleted = changes.filter(c => c.action === 'replace' && c.oldValue);
+      let auditLine = `${dateStr} Enriched: ${enrichedList}`;
+      if (deleted.length > 0) {
+        const deletedParts = deleted.map(c => `${c.field}(was: "${c.oldValue}")`).join(', ');
+        auditLine += ` DELETED: ${deletedParts}`;
+      }
+      const existingNotes = getNotes(person);
+      const newNotes = existingNotes ? auditLine + '\n' + existingNotes : auditLine;
+      if (!person.biographies) person.biographies = [];
+      if (person.biographies.length === 0) person.biographies.push({ contentType: 'TEXT_PLAIN' });
+      person.biographies[0].value = newNotes;
+      dirtySet.add(person.resourceName);
+    }
 
     // Save to Google
     let status = 'synced';
@@ -1834,7 +1890,8 @@ async function syncEnrichmentApproved() {
   renderEnrichProgress();
 }
 
-function applyEnrichField(person, field, val) {
+function applyEnrichField(person, field, val, action) {
+  // action: 'add' = append, 'replace' = overwrite first entry
   switch (field) {
     case 'company':
       if (!person.organizations) person.organizations = [];
@@ -1848,21 +1905,33 @@ function applyEnrichField(person, field, val) {
       break;
     case 'email': {
       if (!person.emailAddresses) person.emailAddresses = [];
-      const exists = person.emailAddresses.some(e => e.value?.toLowerCase() === val.toLowerCase());
-      if (!exists) person.emailAddresses.push({ value: val, type: 'other' });
+      if (action === 'replace' && person.emailAddresses.length > 0) {
+        person.emailAddresses[0].value = val;
+      } else {
+        const exists = person.emailAddresses.some(e => e.value?.toLowerCase() === val.toLowerCase());
+        if (!exists) person.emailAddresses.push({ value: val, type: 'other' });
+      }
       break;
     }
     case 'phone': {
       if (!person.phoneNumbers) person.phoneNumbers = [];
-      const normalized = val.replace(/[\s\-()]/g, '');
-      const exists = person.phoneNumbers.some(p => p.value?.replace(/[\s\-()]/g, '') === normalized);
-      if (!exists) person.phoneNumbers.push({ value: val, type: 'other' });
+      if (action === 'replace' && person.phoneNumbers.length > 0) {
+        person.phoneNumbers[0].value = val;
+      } else {
+        const normalized = val.replace(/[\s\-()]/g, '');
+        const exists = person.phoneNumbers.some(p => p.value?.replace(/[\s\-()]/g, '') === normalized);
+        if (!exists) person.phoneNumbers.push({ value: val, type: 'other' });
+      }
       break;
     }
     case 'location':
       if (!person.addresses) person.addresses = [];
       if (person.addresses.length === 0) person.addresses.push({});
-      person.addresses[0].formattedValue = val;
+      if (action === 'add' && person.addresses[0].formattedValue) {
+        person.addresses.push({ formattedValue: val });
+      } else {
+        person.addresses[0].formattedValue = val;
+      }
       break;
     case 'linkedin':
     case 'twitter':
@@ -1870,14 +1939,25 @@ function applyEnrichField(person, field, val) {
     case 'facebook':
     case 'instagram': {
       if (!person.urls) person.urls = [];
-      const exists = person.urls.some(u => u.value?.toLowerCase() === val.toLowerCase());
-      if (!exists) person.urls.push({ value: val, type: field });
+      if (action === 'replace') {
+        const pattern = field === 'twitter' ? /twitter|x\.com/i : new RegExp(field, 'i');
+        const idx = person.urls.findIndex(u => pattern.test(u.value || ''));
+        if (idx >= 0) { person.urls[idx].value = val; }
+        else person.urls.push({ value: val, type: field });
+      } else {
+        const exists = person.urls.some(u => u.value?.toLowerCase() === val.toLowerCase());
+        if (!exists) person.urls.push({ value: val, type: field });
+      }
       break;
     }
     case 'website': {
       if (!person.urls) person.urls = [];
-      const exists = person.urls.some(u => u.value?.toLowerCase() === val.toLowerCase());
-      if (!exists) person.urls.push({ value: val, type: 'homepage' });
+      if (action === 'replace' && person.urls.length > 0) {
+        person.urls[0].value = val;
+      } else {
+        const exists = person.urls.some(u => u.value?.toLowerCase() === val.toLowerCase());
+        if (!exists) person.urls.push({ value: val, type: 'homepage' });
+      }
       break;
     }
   }
